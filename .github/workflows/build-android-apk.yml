@@ -8,78 +8,107 @@ on:
       - "**/android/**"
       - ".github/workflows/build-android-apk.yml"
 
+permissions:
+  contents: read
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.9"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK 35
-        shell: bash
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          cache-provider: basic
 
       - name: Locate Android project
         id: locate
         shell: bash
         run: |
           set -euo pipefail
-
           SETTINGS_FILE="$(find . -type f \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) | grep '/android/' | head -n 1 || true)"
-
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "Android Gradle project was not found."
+            echo "::error::Android Gradle project was not found."
             echo "Repository tree:"
-            find . -maxdepth 4 -type f | sort | head -n 300
+            find . -maxdepth 5 -type f | sort | head -n 500
             exit 1
           fi
-
           ANDROID_DIR="$(dirname "$SETTINGS_FILE")"
           echo "Found Android project at: $ANDROID_DIR"
           echo "android_dir=$ANDROID_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Build debug APK
+      - name: Check Java Gradle and Android SDK
         shell: bash
         run: |
           set -euo pipefail
-          gradle --no-daemon -p "${{ steps.locate.outputs.android_dir }}" :app:assembleDebug
+          java -version
+          gradle --version
+          echo "ANDROID_HOME=${ANDROID_HOME:-}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
+          command -v sdkmanager
+          sdkmanager --version
+
+      - name: Ensure Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Build debug APK
+        id: gradle_build
+        shell: bash
+        run: |
+          set +e
+          ANDROID_DIR="${{ steps.locate.outputs.android_dir }}"
+          gradle --no-daemon -p "$ANDROID_DIR" :app:assembleDebug --stacktrace 2>&1 | tee android-build.log
+          STATUS=${PIPESTATUS[0]}
+          echo "exit_code=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "Gradle exit code: $STATUS"
+          exit 0
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PakhshMahdi-Android-Build-Log
+          path: android-build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Stop if Gradle failed
+        if: steps.gradle_build.outputs.exit_code != '0'
+        shell: bash
+        run: |
+          echo "::error::Gradle build failed. Download the artifact named PakhshMahdi-Android-Build-Log and open android-build.log."
+          exit 1
 
       - name: Prepare APK artifact
         id: apk
         shell: bash
         run: |
           set -euo pipefail
-
           ANDROID_DIR="${{ steps.locate.outputs.android_dir }}"
           APK_FILE="$(find "$ANDROID_DIR/app/build/outputs/apk" -type f -name '*debug*.apk' | head -n 1 || true)"
-
           if [ -z "$APK_FILE" ]; then
-            echo "APK was not generated."
-            find "$ANDROID_DIR/app/build/outputs" -maxdepth 6 -type f 2>/dev/null | sort || true
+            echo "::error::APK was not generated."
+            find "$ANDROID_DIR/app/build/outputs" -maxdepth 7 -type f 2>/dev/null | sort || true
             exit 1
           fi
-
           mkdir -p release
-          cp "$APK_FILE" release/PakhshMahdi-v0.1.2-debug.apk
-          echo "apk_path=release/PakhshMahdi-v0.1.2-debug.apk" >> "$GITHUB_OUTPUT"
-          ls -lh release/PakhshMahdi-v0.1.2-debug.apk
+          cp "$APK_FILE" release/PakhshMahdi-debug.apk
+          echo "apk_path=release/PakhshMahdi-debug.apk" >> "$GITHUB_OUTPUT"
+          ls -lh release/PakhshMahdi-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
